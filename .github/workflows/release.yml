@@ -30,7 +30,7 @@ jobs:
             os: linux
             python-arch: x64
 
-          # 3. macOS Intel (x64) - Runs on macos-latest via Rosetta 2 to avoid queue waits
+          # 3. macOS Intel (x64) - Runs on macos-latest via Rosetta 2
           - platform-name: macos-intel-x64
             runner: macos-latest
             os: macos
@@ -49,13 +49,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Fix for macOS x64 dyld gettext dependency on Apple Silicon runners
+      - name: Fix macOS x64 Homebrew Library Paths
+        if: matrix.platform-name == 'macos-intel-x64'
+        run: |
+          brew install gettext || true
+          sudo mkdir -p /usr/local/opt
+          for pkg in gettext openssl@3 readline sqlite; do
+            if [ -d "/opt/homebrew/opt/$pkg" ]; then
+              sudo ln -sf "/opt/homebrew/opt/$pkg" "/usr/local/opt/$pkg"
+            fi
+          done
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
           architecture: ${{ matrix.python-arch }}
 
-      # Linux headless runners need display/GUI libraries for Tkinter/rawpy (Ubuntu 24.04 compatible)
+      # Linux headless runners need display/GUI libraries for Tkinter/rawpy
       - name: Install Linux dependencies
         if: matrix.os == 'linux'
         run: |
