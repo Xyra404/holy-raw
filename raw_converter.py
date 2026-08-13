@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QSlider,
 )
 
+__version__ = "1.0.0"
 
 class FileItemWidget(QWidget):
     def __init__(self, filename: str, parent=None):
