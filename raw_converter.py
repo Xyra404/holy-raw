@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import sys
 import os
-import shutil
 import subprocess
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +39,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QCheckBox,
     QSlider,
+    QSpinBox,
 )
 
 __version__ = "1.0.1"
@@ -94,6 +94,11 @@ class RawConverterApp(QWidget):
         self.executor: ThreadPoolExecutor | None = None
         self.futures = []
 
+        # settings file next to this script
+        self._settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "raw_converter_settings.json")
+        self.settings: Dict[str, Any] = {}
+        self._load_settings()
+
         # png option removed; app only produces JPEGs
 
         self._build_ui()
@@ -134,17 +139,40 @@ class RawConverterApp(QWidget):
         self.jpeg_radio.setChecked(True)
 
         self.cap_checkbox = QCheckBox("Resize max dimension to 2048px (Recommended for Messaging)")
+        self.cap_checkbox.setChecked(bool(self.settings.get("resize_cap", True)))
+        self.cap_checkbox.toggled.connect(lambda v: self._save_settings())
 
         self.quality_slider = QSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setRange(70, 100)
-        self.quality_slider.setValue(92)
-        self.quality_label = QLabel("JPEG Quality: 92")
-        self.quality_slider.valueChanged.connect(lambda v: self.quality_label.setText(f"JPEG Quality: {v}"))
+        self.quality_slider.setValue(int(self.settings.get("jpeg_quality", 92)))
+        self.quality_label = QLabel(f"JPEG Quality: {self.quality_slider.value()}")
+        def _on_quality(v):
+            self.quality_label.setText(f"JPEG Quality: {v}")
+            self._save_settings()
+        self.quality_slider.valueChanged.connect(_on_quality)
+
+        # Worker controls
+        try:
+            default_workers = int(self.settings.get("workers", max(1, (os.cpu_count() or 1))))
+        except Exception:
+            default_workers = 2
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(1, 1024)
+        self.workers_spin.setValue(default_workers)
+        self.workers_label = QLabel(f"Workers:")
+        self.use_max_workers_checkbox = QCheckBox("Use max available workers (CPU*4)")
+        self.use_max_workers_checkbox.setChecked(bool(self.settings.get("use_max_workers", False)))
+        self.use_max_workers_checkbox.toggled.connect(lambda v: self.workers_spin.setDisabled(v))
+        self.use_max_workers_checkbox.toggled.connect(lambda v: self._save_settings())
+        self.workers_spin.valueChanged.connect(lambda v: self._save_settings())
 
         s_layout.addWidget(self.jpeg_radio)
         s_layout.addWidget(self.cap_checkbox)
         s_layout.addWidget(self.quality_label)
         s_layout.addWidget(self.quality_slider)
+        s_layout.addWidget(self.workers_label)
+        s_layout.addWidget(self.workers_spin)
+        s_layout.addWidget(self.use_max_workers_checkbox)
 
         settings.setLayout(s_layout)
         layout.addWidget(settings)
@@ -208,9 +236,17 @@ class RawConverterApp(QWidget):
         lw_item.setData(Qt.ItemDataRole.UserRole, idx)
         self.list_widget.addItem(lw_item)
         widget = FileItemWidget(os.path.basename(path))
+        # ensure the item reserves space for the widget
+        lw_item.setSizeHint(widget.sizeHint())
         self.list_widget.setItemWidget(lw_item, widget)
         # store widget ref for updates
         self.files[idx]["widget"] = widget
+        # make sure the UI updates immediately
+        try:
+            self.list_widget.scrollToItem(lw_item)
+            QApplication.processEvents()
+        except Exception:
+            pass
 
     def _on_add_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select RAW files", os.getcwd(), "RAW Files (*.CR2 *.NEF *.ARW *.DNG)")
@@ -227,6 +263,11 @@ class RawConverterApp(QWidget):
         if folder:
             self.output_folder = folder
             self.output_folder_label.setText(f"Output: {folder}")
+            # persist chosen output folder
+            try:
+                self._save_settings()
+            except Exception:
+                pass
 
     def _on_open_output(self):
         folder = getattr(self, 'output_folder', None)
@@ -246,10 +287,46 @@ class RawConverterApp(QWidget):
         except Exception as e:
             self.log(f"Failed to open folder: {e}")
 
+    def _load_settings(self):
+        try:
+            if os.path.exists(self._settings_path):
+                import json
+                with open(self._settings_path, 'r', encoding='utf-8') as f:
+                    self.settings = json.load(f)
+        except Exception:
+            self.settings = {}
+
+    def _save_settings(self):
+        try:
+            import json
+            # gather settings from controls if present
+            self.settings['workers'] = getattr(self, 'workers_spin', None).value() if getattr(self, 'workers_spin', None) else self.settings.get('workers', 1)
+            self.settings['use_max_workers'] = bool(getattr(self, 'use_max_workers_checkbox', None) and self.use_max_workers_checkbox.isChecked())
+            self.settings['jpeg_quality'] = int(getattr(self, 'quality_slider', None).value() if getattr(self, 'quality_slider', None) else self.settings.get('jpeg_quality', 92))
+            self.settings['resize_cap'] = bool(getattr(self, 'cap_checkbox', None) and self.cap_checkbox.isChecked())
+            self.settings['output_folder'] = getattr(self, 'output_folder', self.settings.get('output_folder'))
+            with open(self._settings_path, 'w', encoding='utf-8') as f:
+                json.dump(self.settings, f, indent=2)
+        except Exception as e:
+            # don't crash UI on save
+            self.log(f"Failed to save settings: {e}")
+
     def _on_start(self):
+        # ensure output folder exists; if not selected, create default 'imgout' next to the script
         if not hasattr(self, 'output_folder') or not self.output_folder:
-            self.log("Please select an output folder first.")
-            return
+            default_out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'imgout')
+            try:
+                os.makedirs(default_out, exist_ok=True)
+                self.output_folder = default_out
+                self.output_folder_label.setText(f"Output: {self.output_folder}")
+                try:
+                    self._save_settings()
+                except Exception:
+                    pass
+                self.log(f"No output folder selected — using default: {self.output_folder}")
+            except Exception as e:
+                self.log(f"Please select an output folder first. (failed to create default: {e})")
+                return
         pending = [f for f in self.files if f["status"] == "Pending"]
         if not pending:
             self.log("No pending files to convert.")
@@ -261,7 +338,13 @@ class RawConverterApp(QWidget):
                 f["status"] = "Queued"
                 self._update_list_item(i)
 
-        max_workers = min(4, (os.cpu_count() or 2))
+        if getattr(self, 'use_max_workers_checkbox', None) and self.use_max_workers_checkbox.isChecked():
+            max_workers = max(1, (os.cpu_count() or 1) * 4)
+        else:
+            max_workers = getattr(self, 'workers_spin', None).value() if getattr(self, 'workers_spin', None) else max(1, (os.cpu_count() or 1))
+
+        # Cap at a reasonable upper bound to avoid runaway thread counts
+        max_workers = max(1, min(max_workers, 1024))
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self.log(f"Starting conversion with {max_workers} workers...")
 
@@ -345,7 +428,22 @@ class RawConverterApp(QWidget):
 
             # Prepare output path
             base = os.path.splitext(os.path.basename(path))[0]
-            out_folder = getattr(self, 'output_folder', os.getcwd())
+            out_folder = getattr(self, 'output_folder', None)
+            if not out_folder:
+                default_out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'imgout')
+                try:
+                    os.makedirs(default_out, exist_ok=True)
+                    out_folder = default_out
+                    # persist the default output folder for next run
+                    self.output_folder = out_folder
+                    try:
+                        self._save_settings()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    # fallback to current working directory
+                    self.queue_updates.append({"type": "log", "text": f"Could not create default output folder {default_out}: {e}. Using CWD."})
+                    out_folder = os.getcwd()
 
             # Always produce WhatsApp-ready JPEG
             # Optional resize
