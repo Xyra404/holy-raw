@@ -50,13 +50,21 @@ jobs:
           python-version: '3.10'
 
       # Extract __version__ from raw_converter.py (Works across all OS runners via bash)
+      # Extract __version__ from raw_converter.py
       - name: Extract App Version
         id: get_version
         shell: bash
         run: |
-          VER=$(python -c "import re; m = re.search(r'__version__\s*=\s*[\"']([^\"']+)[\"']', open('raw_converter.py').read()); print(m.group(1) if m else '1.0.0')")
-          echo "VERSION=v${VER}" >> $GITHUB_OUTPUT
-          echo "Extracted Version: v${VER}"
+          python -c "
+          import os
+          for line in open('raw_converter.py'):
+              if '__version__' in line:
+                  ver = line.split('=')[1].replace('\"', '').replace('\'', '').strip()
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write(f'VERSION=v{ver}\n')
+                  print(f'Extracted Version: v{ver}')
+                  break
+          "
 
       # Linux headless runners need display/GUI libraries for Tkinter/rawpy
       - name: Install Linux dependencies
