@@ -55,7 +55,7 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgl1-mesa-glx libglib2.0-0 python3-tk zip
+          sudo apt-get install -y libgl1 libglib2.0-0 python3-tk zip
 
       - name: Install Python build tools
         run: |
