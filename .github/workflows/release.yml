@@ -22,21 +22,25 @@ jobs:
           - platform-name: windows-x64
             runner: windows-latest
             os: windows
+            python-arch: x64
 
           # 2. Linux x64
           - platform-name: linux-x64
             runner: ubuntu-latest
             os: linux
+            python-arch: x64
 
-          # 3. macOS Intel (x64)
+          # 3. macOS Intel (x64) - Runs on macos-latest via Rosetta 2 to avoid queue waits
           - platform-name: macos-intel-x64
-            runner: macos-13
+            runner: macos-latest
             os: macos
+            python-arch: x64
 
           # 4. macOS Apple Silicon (ARM64)
           - platform-name: macos-arm64
             runner: macos-latest
             os: macos
+            python-arch: arm64
 
     # Only run if PR was MERGED from 'dev' branch
     if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'dev'
@@ -49,8 +53,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+          architecture: ${{ matrix.python-arch }}
 
-      # Linux headless runners need display/GUI libraries for Tkinter/rawpy
+      # Linux headless runners need display/GUI libraries for Tkinter/rawpy (Ubuntu 24.04 compatible)
       - name: Install Linux dependencies
         if: matrix.os == 'linux'
         run: |
@@ -111,7 +116,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # Extract __version__ safely using Python strip()
+      # Extract __version__ safely using Python string stripping
       - name: Extract App Version
         id: get_version
         shell: bash
