@@ -9,6 +9,7 @@ permissions:
   contents: write
 
 jobs:
+  # JOB 1: Build binaries across all 4 OS platforms in parallel
   build:
     name: Build (${{ matrix.platform-name }})
     runs-on: ${{ matrix.runner }}
@@ -49,15 +50,6 @@ jobs:
         with:
           python-version: '3.10'
 
-      # Extract __version__ from raw_converter.py (Works across all OS runners via bash)
-      - name: Extract App Version
-        id: get_version
-        shell: bash
-        run: |
-          VER=$(python -c "import re; m = re.search(r'__version__\s*=\s*[\"']([^\"']+)[\"']', open('raw_converter.py').read()); print(m.group(1) if m else '1.0.0')")
-          echo "VERSION=v${VER}" >> $GITHUB_OUTPUT
-          echo "Extracted Version: v${VER}"
-
       # Linux headless runners need display/GUI libraries for Tkinter/rawpy
       - name: Install Linux dependencies
         if: matrix.os == 'linux'
@@ -97,8 +89,55 @@ jobs:
           cd dist
           zip -r ../raw-converter-${{ matrix.platform-name }}.zip raw-converter.app
 
-      # Attach zipped binaries to the GitHub Release tagged with your version
-      - name: Publish to GitHub Release
+      # Upload zipped binary as a temporary build artifact
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-converter-${{ matrix.platform-name }}
+          path: raw-converter-${{ matrix.platform-name }}.zip
+
+  # JOB 2: Collect all built zips and publish a single GitHub Release
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # Extract __version__ safely using Python strip()
+      - name: Extract App Version
+        id: get_version
+        shell: bash
+        run: |
+          python -c "
+          import os
+          ver = '1.0.0'
+          for line in open('raw_converter.py'):
+              if '__version__' in line:
+                  ver = line.split('=')[1].strip(' \"\'\n\r')
+                  break
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'VERSION=v{ver}\n')
+          print(f'Extracted Version: v{ver}')
+          "
+
+      # Download all 4 build artifacts from Job 1
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          pattern: raw-converter-*
+          merge-multiple: true
+
+      # Publish all 4 files to GitHub Releases at once
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.get_version.outputs.VERSION }}
@@ -107,6 +146,6 @@ jobs:
             Automated release generated from PR #${{ github.event.pull_request.number }} (`dev` ➔ `main`).
           draft: false
           prerelease: false
-          files: raw-converter-${{ matrix.platform-name }}.zip
+          files: release-assets/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
