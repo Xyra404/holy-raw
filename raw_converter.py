@@ -42,7 +42,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
 )
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 class FileItemWidget(QWidget):
     def __init__(self, filename: str, parent=None):
@@ -205,6 +205,14 @@ class RawConverterApp(QWidget):
         self.log_console = QTextEdit()
         self.log_console.setReadOnly(True)
         layout.addWidget(self.log_console)
+
+        # Version label bottom-right
+        ver_layout = QHBoxLayout()
+        ver_layout.addStretch()
+        self.version_label = QLabel(f"v{__version__}")
+        self.version_label.setStyleSheet("color: #BBBBBB; font-size: 10px;")
+        ver_layout.addWidget(self.version_label)
+        layout.addLayout(ver_layout)
 
     def log(self, msg: str):
         self.log_console.append(msg)
