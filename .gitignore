@@ -220,3 +220,6 @@ __marimo__/
 .streamlit/secrets.toml
 
 out/
+imgout/
+
+raw_converter_settings.json
