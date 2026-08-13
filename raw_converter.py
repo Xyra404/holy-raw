@@ -6,7 +6,7 @@ Features:
 - PyQt6 GUI with dark theme
 - Drag-and-drop and Add Files / Add Folder
 - Batch conversion using ThreadPoolExecutor
-- WhatsApp-ready JPEG output
+- JPEG output
 
 Requirements: see requirements.txt
 """
@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 import os
 import shutil
+import subprocess
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Any
@@ -40,6 +41,27 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QSlider,
 )
+
+__version__ = "1.0.0"
+
+class FileItemWidget(QWidget):
+    def __init__(self, filename: str, parent=None):
+        super().__init__(parent)
+        self.layout = QHBoxLayout(self)
+        self.name_label = QLabel(filename)
+        self.progress = QProgressBar()
+        self.progress.setValue(0)
+        self.status_label = QLabel("Pending")
+        self.status_label.setFixedWidth(80)
+        self.layout.addWidget(self.name_label)
+        self.layout.addWidget(self.progress)
+        self.layout.addWidget(self.status_label)
+
+    def set_progress(self, v: int):
+        self.progress.setValue(int(v))
+
+    def set_status(self, text: str):
+        self.status_label.setText(text)
 
 
 class DropListWidget(QListWidget):
@@ -72,7 +94,7 @@ class RawConverterApp(QWidget):
         self.executor: ThreadPoolExecutor | None = None
         self.futures = []
 
-        # png option removed; app only produces WhatsApp-ready JPEGs
+        # png option removed; app only produces JPEGs
 
         self._build_ui()
 
@@ -98,6 +120,9 @@ class RawConverterApp(QWidget):
         topbar.addWidget(add_files_btn)
         topbar.addWidget(add_folder_btn)
         topbar.addWidget(select_out_btn)
+        open_out_btn = QPushButton("Open Output Folder")
+        open_out_btn.clicked.connect(self._on_open_output)
+        topbar.addWidget(open_out_btn)
         topbar.addWidget(self.output_folder_label)
         layout.addLayout(topbar)
 
@@ -178,9 +203,14 @@ class RawConverterApp(QWidget):
             return
         item = {"path": path, "status": "Pending"}
         self.files.append(item)
-        lw_item = QListWidgetItem(os.path.basename(path) + " — Pending")
-        lw_item.setData(Qt.ItemDataRole.UserRole, len(self.files) - 1)
+        idx = len(self.files) - 1
+        lw_item = QListWidgetItem()
+        lw_item.setData(Qt.ItemDataRole.UserRole, idx)
         self.list_widget.addItem(lw_item)
+        widget = FileItemWidget(os.path.basename(path))
+        self.list_widget.setItemWidget(lw_item, widget)
+        # store widget ref for updates
+        self.files[idx]["widget"] = widget
 
     def _on_add_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Select RAW files", os.getcwd(), "RAW Files (*.CR2 *.NEF *.ARW *.DNG)")
@@ -197,6 +227,24 @@ class RawConverterApp(QWidget):
         if folder:
             self.output_folder = folder
             self.output_folder_label.setText(f"Output: {folder}")
+
+    def _on_open_output(self):
+        folder = getattr(self, 'output_folder', None)
+        if not folder:
+            self.log("No output folder selected.")
+            return
+        if not os.path.exists(folder):
+            self.log("Output folder does not exist.")
+            return
+        try:
+            if sys.platform.startswith('win'):
+                os.startfile(folder)
+            elif sys.platform.startswith('darwin'):
+                subprocess.run(['open', folder])
+            else:
+                subprocess.run(['xdg-open', folder])
+        except Exception as e:
+            self.log(f"Failed to open folder: {e}")
 
     def _on_start(self):
         if not hasattr(self, 'output_folder') or not self.output_folder:
@@ -232,11 +280,27 @@ class RawConverterApp(QWidget):
                 if typ == "status":
                     idx = msg["index"]
                     self.files[idx]["status"] = msg["status"]
-                    self._update_list_item(idx)
+                    # update widget status if present
+                    w = self.files[idx].get("widget")
+                    if w:
+                        w.set_status(msg["status"])
+                        if msg["status"] == "Done":
+                            w.set_progress(100)
+                        if msg["status"] == "Error":
+                            w.set_progress(0)
+                    else:
+                        self._update_list_item(idx)
                 elif typ == "log":
                     self.log(msg["text"])
                 elif typ == "progress":
-                    self.overall_progress.setValue(msg["value"])
+                    # per-file progress or overall
+                    if "index" in msg:
+                        idx = msg["index"]
+                        w = self.files[idx].get("widget")
+                        if w:
+                            w.set_progress(msg.get("value", 0))
+                    else:
+                        self.overall_progress.setValue(msg["value"])
 
         # Check overall progress based on files statuses
         total = len(self.files)
@@ -268,7 +332,9 @@ class RawConverterApp(QWidget):
             # 1) Read RAW
             try:
                 rr = rawpy.imread(path)
+                self.queue_updates.append({"type": "progress", "index": index, "value": 20})
                 rgb = rr.postprocess(use_camera_wb=True, output_bps=8)
+                self.queue_updates.append({"type": "progress", "index": index, "value": 60})
             except Exception as e:
                 tb = traceback.format_exc()
                 self.queue_updates.append({"type": "log", "text": f"Error reading {path}: {e}\n{tb}"})
@@ -290,10 +356,13 @@ class RawConverterApp(QWidget):
                     ratio = max_dim / max(w, h)
                     new_size = (int(w * ratio), int(h * ratio))
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
+                self.queue_updates.append({"type": "progress", "index": index, "value": 80})
 
             outpath = os.path.join(out_folder, base + ".jpg")
             quality = self.quality_slider.value()
             img.save(outpath, format="JPEG", quality=quality, optimize=True, progressive=True)
+            # saved
+            self.queue_updates.append({"type": "progress", "index": index, "value": 100})
 
             # Report sizes
             try:

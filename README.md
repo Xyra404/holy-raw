@@ -1,6 +1,6 @@
 # RAW Converter (PyQt6)
 
-Desktop app to convert camera RAW files (.CR2, .NEF, .ARW, .DNG) into WhatsApp-optimized JPEGs.
+Desktop app to convert camera RAW files (.CR2, .NEF, .ARW, .DNG) into optimized JPEGs.
 
 Requirements
 - Python 3.10+
@@ -24,7 +24,3 @@ Usage
 - Choose output folder.
 -- Select options (resize cap, JPEG quality) on the settings bar.
 - Click "Start Batch Conversion". The UI remains responsive during conversion.
-
-Notes
-- For WhatsApp JPEGs, default set to 92% quality, progressive, optimize.
-- Outputs WhatsApp-ready JPEGs: default 92% quality, progressive, optimize.
