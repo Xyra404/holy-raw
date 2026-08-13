@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""
+RAW Converter Desktop App
+
+Features:
+- PyQt6 GUI with dark theme
+- Drag-and-drop and Add Files / Add Folder
+- Batch conversion using ThreadPoolExecutor
+- WhatsApp-ready JPEG output
+
+Requirements: see requirements.txt
+"""
+from __future__ import annotations
+
+import sys
+import os
+import shutil
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Dict, Any
+
+import rawpy
+from PIL import Image
+
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import (
+    QApplication,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QFileDialog,
+    QListWidget,
+    QListWidgetItem,
+    QLabel,
+    QProgressBar,
+    QTextEdit,
+    QRadioButton,
+    QGroupBox,
+    QCheckBox,
+    QSlider,
+)
+
+
+class DropListWidget(QListWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        files = []
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            files.append(path)
+        # delegate to parent (main window)
+        if self.parent() is not None:
+            self.parent().add_paths(files)
+
+
+class RawConverterApp(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("RAW Converter")
+        self.resize(900, 600)
+        self.files: List[Dict[str, Any]] = []
+        self.queue_updates: List[Dict[str, Any]] = []
+
+        self.executor: ThreadPoolExecutor | None = None
+        self.futures = []
+
+        # png option removed; app only produces WhatsApp-ready JPEGs
+
+        self._build_ui()
+
+        # Polling queue for worker messages
+        self._timer = QTimer()
+        self._timer.setInterval(200)
+        self._timer.timeout.connect(self._poll_updates)
+        self._timer.start()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Top bar
+        topbar = QHBoxLayout()
+        add_files_btn = QPushButton("Add Files")
+        add_files_btn.clicked.connect(self._on_add_files)
+        add_folder_btn = QPushButton("Add Folder")
+        add_folder_btn.clicked.connect(self._on_add_folder)
+        select_out_btn = QPushButton("Select Output Folder")
+        select_out_btn.clicked.connect(self._on_select_output)
+        self.output_folder_label = QLabel("Output: (not selected)")
+
+        topbar.addWidget(add_files_btn)
+        topbar.addWidget(add_folder_btn)
+        topbar.addWidget(select_out_btn)
+        topbar.addWidget(self.output_folder_label)
+        layout.addLayout(topbar)
+
+        # Settings panel
+        settings = QGroupBox("Settings")
+        s_layout = QHBoxLayout()
+
+        self.jpeg_radio = QRadioButton("JPEG")
+        self.jpeg_radio.setChecked(True)
+
+        self.cap_checkbox = QCheckBox("Resize max dimension to 2048px (Recommended for Messaging)")
+
+        self.quality_slider = QSlider(Qt.Orientation.Horizontal)
+        self.quality_slider.setRange(70, 100)
+        self.quality_slider.setValue(92)
+        self.quality_label = QLabel("JPEG Quality: 92")
+        self.quality_slider.valueChanged.connect(lambda v: self.quality_label.setText(f"JPEG Quality: {v}"))
+
+        s_layout.addWidget(self.jpeg_radio)
+        s_layout.addWidget(self.cap_checkbox)
+        s_layout.addWidget(self.quality_label)
+        s_layout.addWidget(self.quality_slider)
+
+        settings.setLayout(s_layout)
+        layout.addWidget(settings)
+
+        # Center area - file list
+        center_layout = QHBoxLayout()
+        self.list_widget = DropListWidget(self)
+        self.list_widget.setMinimumWidth(500)
+        center_layout.addWidget(self.list_widget)
+
+        # Right: item details / placeholder
+        right_box = QVBoxLayout()
+        right_box.addWidget(QLabel("Queue"))
+        center_layout.addLayout(right_box)
+
+        layout.addLayout(center_layout)
+
+        # Bottom bar
+        bottom = QHBoxLayout()
+        self.overall_progress = QProgressBar()
+        self.overall_progress.setValue(0)
+        start_btn = QPushButton("Start Batch Conversion")
+        start_btn.clicked.connect(self._on_start)
+        bottom.addWidget(self.overall_progress)
+        bottom.addWidget(start_btn)
+
+        layout.addLayout(bottom)
+
+        # Log console
+        self.log_console = QTextEdit()
+        self.log_console.setReadOnly(True)
+        layout.addWidget(self.log_console)
+
+    def log(self, msg: str):
+        self.log_console.append(msg)
+
+    def add_paths(self, paths: List[str]):
+        raw_exts = {".cr2", ".nef", ".arw", ".dng"}
+        added = 0
+        for p in paths:
+            if os.path.isdir(p):
+                for root, _, files in os.walk(p):
+                    for fn in files:
+                        if os.path.splitext(fn)[1].lower() in raw_exts:
+                            full = os.path.join(root, fn)
+                            self._queue_file(full)
+                            added += 1
+            else:
+                if os.path.splitext(p)[1].lower() in raw_exts:
+                    self._queue_file(p)
+                    added += 1
+        self.log(f"Added {added} files to queue.")
+
+    def _queue_file(self, path: str):
+        if any(f["path"] == path for f in self.files):
+            return
+        item = {"path": path, "status": "Pending"}
+        self.files.append(item)
+        lw_item = QListWidgetItem(os.path.basename(path) + " — Pending")
+        lw_item.setData(Qt.ItemDataRole.UserRole, len(self.files) - 1)
+        self.list_widget.addItem(lw_item)
+
+    def _on_add_files(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Select RAW files", os.getcwd(), "RAW Files (*.CR2 *.NEF *.ARW *.DNG)")
+        if files:
+            self.add_paths(files)
+
+    def _on_add_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder", os.getcwd())
+        if folder:
+            self.add_paths([folder])
+
+    def _on_select_output(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Output Folder", os.getcwd())
+        if folder:
+            self.output_folder = folder
+            self.output_folder_label.setText(f"Output: {folder}")
+
+    def _on_start(self):
+        if not hasattr(self, 'output_folder') or not self.output_folder:
+            self.log("Please select an output folder first.")
+            return
+        pending = [f for f in self.files if f["status"] == "Pending"]
+        if not pending:
+            self.log("No pending files to convert.")
+            return
+
+        # Update statuses
+        for i, f in enumerate(self.files):
+            if f["status"] == "Pending":
+                f["status"] = "Queued"
+                self._update_list_item(i)
+
+        max_workers = min(4, (os.cpu_count() or 2))
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.log(f"Starting conversion with {max_workers} workers...")
+
+        tasks = []
+        for i, f in enumerate(self.files):
+            if f["status"] in ("Queued", "Pending"):
+                fut = self.executor.submit(self._convert_worker, i, f["path"]) 
+                tasks.append(fut)
+                self.futures.append(fut)
+
+    def _poll_updates(self):
+        if self.queue_updates:
+            while self.queue_updates:
+                msg = self.queue_updates.pop(0)
+                typ = msg.get("type")
+                if typ == "status":
+                    idx = msg["index"]
+                    self.files[idx]["status"] = msg["status"]
+                    self._update_list_item(idx)
+                elif typ == "log":
+                    self.log(msg["text"])
+                elif typ == "progress":
+                    self.overall_progress.setValue(msg["value"])
+
+        # Check overall progress based on files statuses
+        total = len(self.files)
+        if total:
+            done = sum(1 for f in self.files if f["status"] in ("Done", "Error"))
+            percent = int(100 * done / total)
+            self.overall_progress.setValue(percent)
+
+    def _update_list_item(self, index: int):
+        # find item with matching user role
+        for i in range(self.list_widget.count()):
+            it = self.list_widget.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == index:
+                p = self.files[index]["path"]
+                status = self.files[index]["status"]
+                try:
+                    size = os.path.getsize(p)
+                    display = f"{os.path.basename(p)} — {status} — {size//1024} KB"
+                except Exception:
+                    display = f"{os.path.basename(p)} — {status}"
+                it.setText(display)
+                break
+
+    def _convert_worker(self, index: int, path: str):
+        # Worker runs in threadpool
+        try:
+            self.queue_updates.append({"type": "status", "index": index, "status": "Converting"})
+
+            # 1) Read RAW
+            try:
+                rr = rawpy.imread(path)
+                rgb = rr.postprocess(use_camera_wb=True, output_bps=8)
+            except Exception as e:
+                tb = traceback.format_exc()
+                self.queue_updates.append({"type": "log", "text": f"Error reading {path}: {e}\n{tb}"})
+                self.queue_updates.append({"type": "status", "index": index, "status": "Error"})
+                return
+
+            img = Image.fromarray(rgb)
+
+            # Prepare output path
+            base = os.path.splitext(os.path.basename(path))[0]
+            out_folder = getattr(self, 'output_folder', os.getcwd())
+
+            # Always produce WhatsApp-ready JPEG
+            # Optional resize
+            if self.cap_checkbox.isChecked():
+                max_dim = 2048
+                w, h = img.size
+                if max(w, h) > max_dim:
+                    ratio = max_dim / max(w, h)
+                    new_size = (int(w * ratio), int(h * ratio))
+                    img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+            outpath = os.path.join(out_folder, base + ".jpg")
+            quality = self.quality_slider.value()
+            img.save(outpath, format="JPEG", quality=quality, optimize=True, progressive=True)
+
+            # Report sizes
+            try:
+                raw_size = os.path.getsize(path)
+                out_size = os.path.getsize(outpath)
+                saved = raw_size - out_size
+                pct = 100.0 * (saved) / raw_size if raw_size > 0 else 0.0
+                self.queue_updates.append({"type": "log", "text": f"Converted {os.path.basename(path)} -> {os.path.basename(outpath)} ({out_size//1024} KB), saved {int(pct)}%"})
+            except Exception:
+                pass
+
+            self.queue_updates.append({"type": "status", "index": index, "status": "Done"})
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            self.queue_updates.append({"type": "log", "text": f"Unexpected error for {path}: {e}\n{tb}"})
+            self.queue_updates.append({"type": "status", "index": index, "status": "Error"})
+
+
+def main():
+    app = QApplication(sys.argv)
+    # Dark palette
+    app.setStyle("Fusion")
+    from PyQt6.QtGui import QPalette, QColor
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Base, QColor(35, 35, 35))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.ToolTipText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Text, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.Button, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.ButtonText, Qt.GlobalColor.white)
+    palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
+    app.setPalette(palette)
+
+    w = RawConverterApp()
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
