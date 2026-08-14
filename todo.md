@@ -3,7 +3,6 @@
     - Add cancel button for conversion
     - Clear queue/item button (Clear Single + Clear All options)
     - Edit option that opens an edit photo window with sliders and controls for exposure, contrast, saturation, white balence, etc. (includes live preview while editing file) + save profiles / settings
-    - 
 
 - Retry conversion popup when conversion fails (only retries failed files)
 - Drag and drop files / folders into queue
